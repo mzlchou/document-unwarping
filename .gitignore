@@ -1,0 +1,5 @@
+renders/
+evaluation_results/
+best_model.pth
+__pycache__/
+*.pyc
