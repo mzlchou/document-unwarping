@@ -14,7 +14,7 @@ from PIL import Image
 
 # Import your modules
 from dataset_loader import get_dataloaders
-from model import DocumentUnwarpModel, visualize_results
+from final.model2 import DocumentUnwarpModel, visualize_results
 
 # Metrics
 try:
@@ -283,7 +283,7 @@ def process_folder(model, input_folder, output_folder, device='cuda', img_size=5
                 output_img.save(output_path / output_name, quality=95)
                 
                 # Also save flow visualization
-                from model import visualize_flow
+                from final.model2 import visualize_flow
                 flow_vis = visualize_flow(flow)
                 flow_pil = Image.fromarray(flow_vis)
                 flow_pil = flow_pil.resize(original.size, Image.NEAREST)

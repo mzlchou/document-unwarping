@@ -37,7 +37,7 @@ print("\nFiles in repo:")
 !ls -la
 
 # %% [code]
-from model import DocumentUnwarpModel
+from final.model2 import DocumentUnwarpModel
 from dataset_loader import get_dataloaders, visualize_batch
 
 print("Successfully imported model and dataset_loader from your GitHub repo!")

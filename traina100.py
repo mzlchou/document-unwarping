@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-CORRECTED A100 TRAINING SCRIPT: GEOMETRY OPTIMIZED
-Combines A100 speed with proper geometric loss + complete training pipeline
+FINAL A100 TRAINING SCRIPT: OPTIMIZED FOR TEXT CLARITY
+Combines A100 speed + Old Script stability + Text readability
 """
 
 import os
@@ -38,17 +38,26 @@ os.chdir(GITHUB_REPO)
 print(f"✓ Repository cloned to: {os.getcwd()}")
 
 # ============================================================
-# STEP 3: CONFIGURATION
+# STEP 3: CONFIGURATION (A100 OPTIMIZED + TEXT CLARITY)
 # ============================================================
 CONFIG = {
+    # A100 Settings
     'batch_size': 32,              
     'img_size': 512,
     'num_epochs': 50,
-    'learning_rate': 1e-4,
+    'learning_rate': 1e-4,         # Same as old script
     'num_workers': 8,              
-    'flow_scale': 1.0,             # 1.0 for better geometry
+    'flow_scale': 1.0,             # ✅ CRITICAL: 1.0 like old script
     'save_every': 5,
     'early_stopping_patience': 12,
+    
+    # Loss Weights (Rebalanced for text clarity)
+    'l1_weight': 0.7,              # 70% - Heavy lifting for geometry
+    'ssim_weight': 0.2,            # 20% - Structural validation
+    'perceptual_weight': 0.1,      # 10% - Text clarity boost
+    'use_perceptual': True,        # Enable perceptual loss
+    
+    # Paths
     'zip_path': '/content/drive/MyDrive/renders.zip',
     'data_dir': '/content/dataset'
 }
@@ -79,44 +88,87 @@ EXTRACTED_ROOT = f"{CONFIG['data_dir']}/renders/synthetic_data_pitch_sweep"
 from model import DocumentUnwarpModel
 from dataset_loader import get_dataloaders
 from pytorch_msssim import ssim
+import torchvision.models as models
 print("✓ Imports successful")
 
 # ============================================================
-# STEP 6: CORRECTED GEOMETRIC LOSS
+# STEP 6: FIXED PERCEPTUAL LOSS (FOR TEXT CLARITY)
 # ============================================================
-class GeometricCombinedLoss(nn.Module):
+class PerceptualLoss(nn.Module):
     """
-    Geometry-focused loss with proper handling of normalized images.
-    30% Masked L1 + 70% SSIM
+    VGG-based perceptual loss with proper denormalization.
+    This helps preserve high-frequency details like text edges.
     """
     def __init__(self):
         super().__init__()
-        self.l1 = nn.L1Loss(reduction='none')
+        # Use VGG16 features (captures edges and textures)
+        vgg = models.vgg16(pretrained=True).features[:16]
+        self.vgg = vgg.eval()
+        for param in self.vgg.parameters():
+            param.requires_grad = False
 
-    def forward(self, pred, target, mask):
-        # 1. Masked L1 Loss (on normalized images - this is fine)
-        l1_raw = self.l1(pred, target)
-        mask_expanded = mask.expand_as(l1_raw)
-        l1_loss = (l1_raw * mask_expanded).sum() / (mask_expanded.sum() + 1e-8)
-        
-        # 2. SSIM Loss on DENORMALIZED images (CRITICAL FIX!)
-        # Images are normalized, so we need to denormalize for SSIM
+    def forward(self, pred, target):
+        # ✅ CRITICAL FIX: Denormalize before VGG
         mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(pred.device)
         std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(pred.device)
         
         pred_denorm = (pred * std + mean).clamp(0, 1)
         target_denorm = (target * std + mean).clamp(0, 1)
         
-        ssim_val = ssim(pred_denorm, target_denorm, data_range=1.0)
-        ssim_loss = 1 - ssim_val
+        pred_features = self.vgg(pred_denorm)
+        target_features = self.vgg(target_denorm)
+        return F.mse_loss(pred_features, target_features)
+
+# ============================================================
+# STEP 7: ENHANCED GEOMETRIC LOSS (WITH TEXT CLARITY)
+# ============================================================
+class EnhancedGeometricLoss(nn.Module):
+    """
+    Balanced loss for geometry + text clarity:
+    - L1 (70%): Heavy lifting for geometric correction
+    - SSIM (20%): Structural validation
+    - Perceptual (10%): Text sharpness and detail preservation
+    """
+    def __init__(self, l1_weight=0.7, ssim_weight=0.2, perceptual_weight=0.1):
+        super().__init__()
+        self.l1_weight = l1_weight
+        self.ssim_weight = ssim_weight
+        self.perceptual_weight = perceptual_weight
+        self.l1 = nn.L1Loss(reduction='none')
+
+    def forward(self, pred, target, mask, perceptual_fn=None):
+        total_loss = 0.0
         
-        # 3. Combine (30% L1, 70% SSIM for geometry focus)
-        return (0.3 * l1_loss) + (0.7 * ssim_loss)
+        # 1. Masked L1 Loss (Heavy lifter - 70%)
+        if self.l1_weight > 0:
+            l1_raw = self.l1(pred, target)
+            mask_expanded = mask.expand_as(l1_raw)
+            l1_loss = (l1_raw * mask_expanded).sum() / (mask_expanded.sum() + 1e-8)
+            total_loss += self.l1_weight * l1_loss
+        
+        # 2. SSIM Loss on DENORMALIZED images (Structural - 20%)
+        if self.ssim_weight > 0:
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(pred.device)
+            std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(pred.device)
+            
+            pred_denorm = (pred * std + mean).clamp(0, 1)
+            target_denorm = (target * std + mean).clamp(0, 1)
+            
+            ssim_val = ssim(pred_denorm, target_denorm, data_range=1.0)
+            ssim_loss = 1 - ssim_val
+            total_loss += self.ssim_weight * ssim_loss
+        
+        # 3. Perceptual Loss (Text clarity - 10%)
+        if self.perceptual_weight > 0 and perceptual_fn is not None:
+            perc_loss = perceptual_fn(pred, target)
+            total_loss += self.perceptual_weight * perc_loss
+        
+        return total_loss
 
 print("✓ Loss function defined")
 
 # ============================================================
-# STEP 7: MODEL & DATA SETUP
+# STEP 8: MODEL & DATA SETUP
 # ============================================================
 device = torch.device('cuda')
 print(f"\n🖥️  GPU: {torch.cuda.get_device_name(0)}")
@@ -125,10 +177,29 @@ model = DocumentUnwarpModel(flow_scale=CONFIG['flow_scale']).to(device)
 num_params = sum(p.numel() for p in model.parameters())
 print(f"✓ Model: {num_params:,} parameters")
 
-criterion = GeometricCombinedLoss()
+# Initialize losses
+criterion = EnhancedGeometricLoss(
+    l1_weight=CONFIG['l1_weight'],
+    ssim_weight=CONFIG['ssim_weight'],
+    perceptual_weight=CONFIG['perceptual_weight']
+)
+
+# Perceptual loss (for text clarity)
+perceptual_loss = None
+if CONFIG['use_perceptual']:
+    try:
+        perceptual_loss = PerceptualLoss().to(device)
+        print("✓ Perceptual loss initialized (for text clarity)")
+    except Exception as e:
+        print(f"⚠️  Perceptual loss failed: {e}")
+        print("   Continuing with L1+SSIM only")
+        CONFIG['perceptual_weight'] = 0.0
+
 optimizer = optim.AdamW(model.parameters(), lr=CONFIG['learning_rate'], weight_decay=1e-4)
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=CONFIG['num_epochs'])
 scaler = GradScaler()
+
+print(f"✓ Loss: L1({CONFIG['l1_weight']:.1f}) + SSIM({CONFIG['ssim_weight']:.1f}) + Perceptual({CONFIG['perceptual_weight']:.1f})")
 
 print("\n📊 Loading dataset...")
 train_loader, val_loader = get_dataloaders(
@@ -148,7 +219,7 @@ checkpoint_dir.mkdir(exist_ok=True, parents=True)
 drive_backup_dir.mkdir(exist_ok=True, parents=True)
 
 # ============================================================
-# STEP 8: VISUALIZATION HELPER (WITH MASKING!)
+# STEP 9: VISUALIZATION HELPER (WITH MASKING!)
 # ============================================================
 def denormalize(img):
     """Denormalize for visualization."""
@@ -167,7 +238,7 @@ def visualize_results(epoch):
         mask = batch['border'][:2].to(device)
         pred, _, _ = model(rgb)
         
-        # CRITICAL: Apply mask to remove background
+        # ✅ CRITICAL: Apply mask to remove background (grass)
         pred_masked = pred * mask
     
     # Denormalize
@@ -178,18 +249,18 @@ def visualize_results(epoch):
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     for i in range(2):
         axes[i, 0].imshow(rgb_vis[i].permute(1, 2, 0).numpy())
-        axes[i, 0].set_title('Input (Warped)', fontweight='bold')
+        axes[i, 0].set_title('Input (Warped)', fontweight='bold', fontsize=12)
         axes[i, 0].axis('off')
         
         axes[i, 1].imshow(pred_vis[i].permute(1, 2, 0).numpy())
-        axes[i, 1].set_title('Prediction', fontweight='bold')
+        axes[i, 1].set_title('Prediction (Clean)', fontweight='bold', fontsize=12)
         axes[i, 1].axis('off')
         
         axes[i, 2].imshow(gt_vis[i].permute(1, 2, 0).numpy())
-        axes[i, 2].set_title('Ground Truth', fontweight='bold')
+        axes[i, 2].set_title('Ground Truth', fontweight='bold', fontsize=12)
         axes[i, 2].axis('off')
     
-    plt.suptitle(f'Epoch {epoch}', fontsize=16, fontweight='bold')
+    plt.suptitle(f'Epoch {epoch} - Text Clarity Enhanced', fontsize=16, fontweight='bold')
     plt.tight_layout()
     
     # Save to both local and Drive
@@ -203,10 +274,10 @@ def visualize_results(epoch):
 print("✓ Visualization ready")
 
 # ============================================================
-# STEP 9: TRAINING LOOP
+# STEP 10: TRAINING LOOP
 # ============================================================
 print("\n" + "="*70)
-print("🔥 STARTING TRAINING")
+print("🔥 STARTING A100 TRAINING (Text Clarity Enhanced)")
 print("="*70)
 
 train_losses, val_losses, train_ssims, val_ssims = [], [], [], []
@@ -229,7 +300,7 @@ for epoch in range(1, CONFIG['num_epochs'] + 1):
         
         with autocast():
             rectified, _, _ = model(rgb)
-            loss = criterion(rectified, gt, mask)
+            loss = criterion(rectified, gt, mask, perceptual_fn=perceptual_loss)
             
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -266,7 +337,7 @@ for epoch in range(1, CONFIG['num_epochs'] + 1):
             mask = batch['border'].to(device)
             
             rectified, _, _ = model(rgb)
-            val_loss += criterion(rectified, gt, mask).item()
+            val_loss += criterion(rectified, gt, mask, perceptual_fn=perceptual_loss).item()
             
             # SSIM on denormalized
             mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(rgb.device)
@@ -289,6 +360,16 @@ for epoch in range(1, CONFIG['num_epochs'] + 1):
     print(f"Train Loss: {avg_train_loss:.4f} | Train SSIM: {avg_train_ssim:.4f}")
     print(f"Val Loss:   {avg_val_loss:.4f} | Val SSIM:   {avg_val_ssim:.4f}")
     print(f"LR:         {scheduler.get_last_lr()[0]:.6f}")
+    
+    # Quality assessment
+    if avg_val_ssim > 0.85:
+        print(f"🎯 Quality: EXCELLENT - Text should be readable")
+    elif avg_val_ssim > 0.75:
+        print(f"✅ Quality: GOOD - Text mostly readable")
+    elif avg_val_ssim > 0.65:
+        print(f"⚠️  Quality: FAIR - Text clarity needs improvement")
+    else:
+        print(f"❌ Quality: NEEDS IMPROVEMENT")
     
     # ========== CHECKPOINTING ==========
     is_best = avg_val_loss < best_val_loss
@@ -339,7 +420,7 @@ for epoch in range(1, CONFIG['num_epochs'] + 1):
         break
 
 # ============================================================
-# STEP 10: FINAL MODEL & PLOTS
+# STEP 11: FINAL MODEL & PLOTS
 # ============================================================
 print("\n" + "="*70)
 print("💾 SAVING FINAL MODEL")
@@ -362,15 +443,20 @@ shutil.copy(checkpoint_dir / 'final_model.pth', drive_backup_dir / 'final_model.
 # Training curves
 fig, axes = plt.subplots(1, 2, figsize=(15, 5))
 
-axes[0].plot(train_losses, 'o-', label='Train', linewidth=2)
-axes[0].plot(val_losses, 's-', label='Val', linewidth=2)
+axes[0].plot(train_losses, 'o-', label='Train', linewidth=2, markersize=3)
+axes[0].plot(val_losses, 's-', label='Val', linewidth=2, markersize=3)
+axes[0].axhline(best_val_loss, color='r', linestyle='--', alpha=0.5, label=f'Best ({best_val_loss:.3f})')
 axes[0].set_xlabel('Epoch'); axes[0].set_ylabel('Loss')
-axes[0].set_title('Loss'); axes[0].legend(); axes[0].grid(alpha=0.3)
+axes[0].set_title('Training Loss (Lower = Better)', fontweight='bold')
+axes[0].legend(); axes[0].grid(alpha=0.3)
 
-axes[1].plot(train_ssims, 'o-', label='Train', linewidth=2)
-axes[1].plot(val_ssims, 's-', label='Val', linewidth=2)
+axes[1].plot(train_ssims, 'o-', label='Train', linewidth=2, markersize=3)
+axes[1].plot(val_ssims, 's-', label='Val', linewidth=2, markersize=3)
+axes[1].axhline(0.85, color='g', linestyle='--', alpha=0.5, label='Excellent (0.85)')
+axes[1].axhline(0.75, color='orange', linestyle='--', alpha=0.5, label='Good (0.75)')
 axes[1].set_xlabel('Epoch'); axes[1].set_ylabel('SSIM')
-axes[1].set_title('SSIM'); axes[1].legend(); axes[1].grid(alpha=0.3)
+axes[1].set_title('SSIM (Higher = Better Text Quality)', fontweight='bold')
+axes[1].legend(); axes[1].grid(alpha=0.3)
 
 plt.tight_layout()
 plt.savefig(checkpoint_dir / 'training_curves.png', dpi=150)
@@ -379,7 +465,7 @@ shutil.copy(checkpoint_dir / 'training_curves.png',
 plt.show()
 
 # ============================================================
-# STEP 11: SUMMARY & DOWNLOAD
+# STEP 12: SUMMARY & DOWNLOAD
 # ============================================================
 print("\n" + "="*70)
 print("🎉 TRAINING COMPLETE!")
@@ -387,15 +473,18 @@ print("="*70)
 print(f"Best Val Loss: {best_val_loss:.4f}")
 print(f"Best Val SSIM: {max(val_ssims):.4f}")
 print(f"Total Time:    {(time.time()-start_time)/60:.1f} minutes")
+print(f"\n📝 Text Readability Target: SSIM > 0.75")
+print(f"   Your Result: {'✅ ACHIEVED' if max(val_ssims) > 0.75 else '⚠️  NEEDS MORE TRAINING'}")
 
 from google.colab import files
 try:
     files.download(str(checkpoint_dir / 'best_model.pth'))
     files.download(str(checkpoint_dir / 'training_curves.png'))
+    print("\n✓ Files downloaded")
 except:
-    print("Files saved to Drive backup")
+    print("\n✓ Files saved to Drive backup")
 
-print("\n⏰ Terminating in 60s...")
+print("\n⏰ Terminating in 60s to save A100 credits...")
 time.sleep(60)
 from google.colab import runtime
 runtime.unassign()
