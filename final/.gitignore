@@ -1,0 +1,6 @@
+renders/
+evaluation_results/
+best_model.pth
+__pycache__/
+*.pyc
+checkpoint_epoch_020CURSOR 7 UPDATE CLAUIDE.pth
